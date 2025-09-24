@@ -61,16 +61,21 @@ public:
 private:
     void writerLoop(const std::stop_token &stoken);
 
-    void openLogFile();
+    BOOL openLogFile();
 
     BOOL writeBufferToDisk(std::string const& buffer);
 
-    void rotateFile();
+    BOOL rotateFile();
 
     BOOL ensureDirectoryExists() const;
 
-    static std::string
-    toUtf8(std::wstring const& wstr);
+    void cleanupOldFiles() const;
+
+    static ULONGLONG GetFileTimeValue(const std::wstring& path);
+    static std::string toUtf8(std::wstring const& wstr);
+
+    BOOL recoverFromWriteError(DWORD error);
+    BOOL conditionalFlush() const;
 
     std::wstring m_logDirectoryW;
     std::wstring m_baseFileName;
@@ -78,6 +83,7 @@ private:
     ULONGLONG m_rotateCount;
     ULONGLONG m_flushIntervalMs;
     ULONGLONG m_flushThresholdBytes;
+    ULONGLONG m_currentQueueSize{0};
     BOOL m_fsyncOnFlush;
 
     std::jthread m_worker;
@@ -89,6 +95,9 @@ private:
     std::atomic<ULONGLONG> m_dropped{ 0 };
     std::atomic<BOOL> m_running{ false };
     std::atomic<ULONGLONG> m_currentFileBytes{ 0 };
+
+    std::atomic<bool> m_immediate_flush_requested{false};
+    std::mutex m_file_mutex;
 
     std::wstring m_currentFilePathW;
     ULONGLONG m_rotationSerial{ 0 }; 

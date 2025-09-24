@@ -6,24 +6,6 @@
 #include <utility>
 #include <vector>
 #include <iostream>
-
-// Documentation references:
-//
-// RegisterEventSource / DeregisterEventSource: get/close handle to event log.
-//  https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-registereventsourcea
-//  https://learn.microsoft.com/en-us/windows/win32/eventlog/event-logging-functions
-//  (If the source is missing the API will use Application log; installer should create sources).
-//  See: RegisterEventSource remarks. :contentReference[oaicite:9]{index=9}
-//
-// ReportEvent: used to write the event entry. Size limitations exist; be cautious with large payloads.
-//  https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reporteventa
-//  On Vista+ there are practical limits ~61,440 bytes for message payloads in RPC transfer; large blobs should not be sent. :contentReference[oaicite:10]{index=10}
-//
-// Best practice: register event sources at install time (requires admin); do not attempt to create message DLLs at runtime.
-//  See Reporting Events guidance. :contentReference[oaicite:11]{index=11}
-//
-// ETW is an alternative for high-throughput telemetry (EventWrite/EventRegister). Use EventLog for administrative events. :contentReference[oaicite:12]{index=12}
-
 namespace core::logging
 {
 
@@ -61,89 +43,44 @@ WORD EventLogSink::mapLevelToEventType(LogLevel level)
     {
         case LogLevel::Trace:
         case LogLevel::Debug:
+            return EVENTLOG_INFORMATION_TYPE;
         case LogLevel::Info:
-        {
-            return EVENTLOG_INFORMATION_TYPE;
-        }
+            return EVENTLOG_SUCCESS;
         case LogLevel::Warn:
-        {
             return EVENTLOG_WARNING_TYPE;
-        }
         case LogLevel::Error:
-        case LogLevel::Critical:
-        {
             return EVENTLOG_ERROR_TYPE;
-        }
+        case LogLevel::Critical:
+            return EVENTLOG_AUDIT_FAILURE;
         default:
-        {
             return EVENTLOG_INFORMATION_TYPE;
-        }
     }
 }
 
 // ---------- constructor / destructor ----------
-EventLogSink::EventLogSink(std::wstring  sourceNameW, IThreadManager* threadManager)
-    : m_sourceNameW(std::move(sourceNameW))
-    , m_hEventLog(nullptr)
-    , m_threadManager(threadManager)
-    , m_running(false)
-    , m_dropped(0ull)
+    EventLogSink::EventLogSink(std::wstring sourceNameW, IThreadManager* threadManager)
+        : m_sourceNameW(std::move(sourceNameW))
+        , m_hEventLog(nullptr)
+        , m_threadManager(threadManager)
+        , m_running(false)
+        , m_dropped(0ull)
+        , m_current_queue_memory(0)
+        , m_immediate_flush_requested(false)
 {
     m_hEventLog = RegisterEventSourceW(nullptr, m_sourceNameW.c_str());
-    if (m_hEventLog == nullptr)
-    {
-        const DWORD err = GetLastError();
-        std::cerr << "EventLogSink: RegisterEventSourceW failed error=" << err << "\n";
-        // Proceed with m_hEventLog == nullptr: ReportEvent will fail later; keep sink alive so other sinks can work.
+    if (m_hEventLog == nullptr) {
+        const DWORD error = GetLastError();
+        std::cerr << "EventLogSink: RegisterEventSourceW failed error=" << error << "\n";
     }
 
-    m_running.store(true);
+    m_running.store(true, std::memory_order_release);
 
-    if (m_threadManager == nullptr)
-    {
-        m_worker = std::jthread([this](const std::stop_token &st)
-        {
+    if (m_threadManager == nullptr) {
+        m_worker = std::jthread([this](std::stop_token st) {
             this->writerLoop(st);
         });
-    }
-    else
-    {
-        const IThreadManager::Task task = [this]()
-        {
-            while (m_running.load())
-            {
-                {
-                    std::unique_lock<std::mutex> lk(m_mutex);
-                    if (m_queue.empty())
-                    {
-                        lk.unlock();
-                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                        continue;
-                    }
-                }
-
-                std::vector<std::wstring> batch;
-                {
-                    std::lock_guard<std::mutex> lk(m_mutex);
-                    while (!m_queue.empty())
-                    {
-                        batch.push_back(std::move(m_queue.front()));
-                        m_queue.pop_front();
-                        if (batch.size() >= 64u)
-                        {
-                            break;
-                        }
-                    }
-                }
-
-                for (const auto & i : batch)
-                {
-                    this->sendEventWide(i, LogLevel::Info);
-                }
-            }
-        };
-
-        m_threadManager->enqueue(task);
+    } else {
+        startThreadManagerTask();
     }
 }
 
@@ -159,138 +96,255 @@ EventLogSink::~EventLogSink()
     }
 }
 
-void EventLogSink::consume(std::vector<LogRecord> const& batch)
+void EventLogSink::consume(const std::vector<LogRecord>& batch)
 {
-    if (!m_running.load())
+    if (!m_running.load(std::memory_order_acquire))
     {
-        m_dropped.fetch_add(1ull);
+        m_dropped.fetch_add(batch.size(), std::memory_order_relaxed);
         return;
     }
 
-    std::lock_guard<std::mutex> lk(m_mutex);
+    std::vector<std::wstring> prepared_batch;
+    prepared_batch.reserve(batch.size());
 
-    for (const auto & i : batch)
+    ULONGLONG total_size = 0;
+    for (const LogRecord &record: batch)
     {
-        std::string line = i.toNDJsonLine();
+        std::string line = record.toNDJsonLine();
 
-        std::size_t bytes = line.size();
-        if (bytes > static_cast<std::size_t>(kMaxPayloadBytes))
+        if (line.size() > static_cast<size_t>(kMaxPayloadBytes))
         {
-            std::string truncated = line.substr(0, static_cast<std::size_t>(kMaxPayloadBytes - 128u));
+            std::string truncated = line.substr(0, static_cast<size_t>(kMaxPayloadBytes - 128u));
             truncated.append("...[TRUNCATED]");
-            if (i.snapshot_id.has_value())
+            if (record.snapshot_id.has_value())
             {
                 truncated.append(" snap=");
-                truncated.append(i.snapshot_id.value());
+                truncated.append(record.snapshot_id.value());
             }
-            m_queue.push_back(utf8ToWide(truncated));
+            line = std::move(truncated);
         }
-        else
+
+        prepared_batch.push_back(utf8ToWide(line));
+        total_size += line.size();
+    }
+
+    {
+        std::lock_guard lk(m_mutex);
+
+        constexpr size_t MAX_QUEUE_SIZE = 10000;
+        constexpr ULONGLONG MAX_QUEUE_MEMORY = 100 * 1024 * 1024;
+
+        if (m_queue.size() + prepared_batch.size() > MAX_QUEUE_SIZE ||
+            m_current_queue_memory + total_size > MAX_QUEUE_MEMORY)
         {
-            std::wstring wide = utf8ToWide(line);
-            m_queue.push_back(std::move(wide));
+            while (!m_queue.empty() &&
+                   (m_queue.size() + prepared_batch.size() > MAX_QUEUE_SIZE ||
+                    m_current_queue_memory + total_size > MAX_QUEUE_MEMORY))
+            {
+                m_current_queue_memory -= m_queue.front().size() * sizeof(wchar_t);
+                m_queue.pop_front();
+                m_dropped.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        for (std::wstring &message: prepared_batch)
+        {
+            m_queue.push_back(std::move(message));
+            m_current_queue_memory += message.size() * sizeof(wchar_t);
         }
     }
 
     m_cv.notify_one();
 }
 
-void EventLogSink::writerLoop(const std::stop_token &stoken)
+void EventLogSink::writerLoop(const std::stop_token& stoken)
 {
     while (!stoken.stop_requested() || !m_queue.empty())
     {
-        std::vector<std::wstring> batch;
-        {
-            std::unique_lock<std::mutex> lk(m_mutex);
+        bool immediate_flush = false;
+        std::vector<std::wstring> batch; {
+            std::unique_lock lk(m_mutex);
+
+            if (m_immediate_flush_requested && m_queue.empty())
+            {
+                m_immediate_flush_requested = false;
+                m_cv.notify_all();
+                continue;
+            }
+
             if (m_queue.empty())
             {
-                m_cv.wait_for(lk, std::chrono::milliseconds(200));
+                m_cv.wait_for(lk, std::chrono::milliseconds(200), [this, &stoken]
+                {
+                    return !m_queue.empty() || stoken.stop_requested() || m_immediate_flush_requested;
+                });
             }
 
             while (!m_queue.empty() && batch.size() < 64u)
             {
                 batch.push_back(std::move(m_queue.front()));
                 m_queue.pop_front();
+                m_current_queue_memory -= batch.back().size() * sizeof(wchar_t);
             }
+
+            immediate_flush = m_immediate_flush_requested;
         }
 
-        for (const auto & i : batch)
+
+        if (!batch.empty() || immediate_flush)
         {
-            const LogLevel level = LogLevel::Info;
-            const bool ok = sendEventWide(i, level);
-            if (!ok)
+            processBatch(batch);
+
+            if (immediate_flush)
             {
-                m_dropped.fetch_add(1ull);
+                std::lock_guard lk(m_mutex);
+                if (m_queue.empty())
+                {
+                    m_immediate_flush_requested = false;
+                    m_cv.notify_all();
+                }
             }
         }
     }
-
-    // flush finished; deregistration handled in close()
 }
 
 // ---------- send single event with ReportEventW ----------
-bool EventLogSink::sendEventWide(std::wstring const& wideLine, const LogLevel level)
+bool EventLogSink::sendEventWide(const std::wstring& wideLine, LogLevel level)
 {
-    if (m_hEventLog == nullptr)
-    {
+    // 1. Проверка и восстановление handle при необходимости
+    if (m_hEventLog == nullptr) {
         m_hEventLog = RegisterEventSourceW(nullptr, m_sourceNameW.c_str());
-        if (m_hEventLog == nullptr)
-        {
-            const DWORD err = GetLastError();
-            std::cerr << "EventLogSink: RegisterEventSourceW retry failed error=" << err << "\n";
+        if (m_hEventLog == nullptr) {
+            DWORD error = GetLastError();
+            // Критические ошибки (нет прав, источник не зарегистрирован)
+            if (error == ERROR_ACCESS_DENIED || error == RPC_S_SERVER_UNAVAILABLE) {
+                std::cerr << "EventLogSink: critical error, event logging disabled: " << error << "\n";
+                return false;
+            }
+            // Временные ошибки - попробуем еще раз позже
             return false;
         }
     }
 
-    LPCWSTR strings[1];
-    strings[0] = wideLine.c_str();
-
+    // 2. Подготовка данных для ReportEventW
+    LPCWSTR strings[1] = { wideLine.c_str() };
     const WORD type = mapLevelToEventType(level);
 
-    constexpr DWORD eventId = 0u;
+    constexpr DWORD eventId = 1u; // Базовый ID события
     constexpr WORD numStrings = 1u;
     constexpr DWORD dataSize = 0u;
-
     LPVOID rawData = nullptr;
 
-    const BOOL res = ReportEventW(m_hEventLog,
-                                  type,
-                                  0u,
-                                  eventId,
-                                  nullptr,
-                                  numStrings,
-                                  dataSize,
-                                  strings,
-                                  rawData);
+    // 3. Попытка отправки с повторными попытками при временных ошибках
+    const int max_attempts = 3;
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        BOOL success = ReportEventW(m_hEventLog, type, 0u, eventId, nullptr,
+                                  numStrings, dataSize, strings, rawData);
 
-    if (res == FALSE)
-    {
-        const DWORD err = GetLastError();
-        std::cerr << "EventLogSink: ReportEventW failed error=" << err << "\n";
-        return false;
-    }
+        if (success) {
+            return true;
+        }
 
-    return true;
-}
+        DWORD error = GetLastError();
 
-// ---------- flush ----------
-void
-EventLogSink::flush()
-{
-    // Wait until queue empty
-    while (true)
-    {
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            if (m_queue.empty())
-            {
-                break;
+        // Критические ошибки - не повторяем
+        if (error == ERROR_ACCESS_DENIED || error == RPC_S_SERVER_UNAVAILABLE) {
+            std::cerr << "EventLogSink: critical report error: " << error << "\n";
+            break;
+        }
+
+        // Временные ошибки - повторяем с задержкой
+        if (attempt < max_attempts - 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
+
+            // Попробуем переоткрыть handle при определенных ошибках
+            if (error == RPC_S_INVALID_BINDING || error == EVENTLOG_CANT_OPEN_LOG) {
+                if (m_hEventLog != nullptr) {
+                    DeregisterEventSource(m_hEventLog);
+                    m_hEventLog = nullptr;
+                }
+                m_hEventLog = RegisterEventSourceW(nullptr, m_sourceNameW.c_str());
             }
         }
-        m_cv.notify_one();
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // 4. Все попытки failed - логируем ошибку
+    std::cerr << "EventLogSink: failed to report event after " << max_attempts << " attempts\n";
+    return false;
+}
+
+    void EventLogSink::startThreadManagerTask()
+{
+    // Периодическая задача вместо вечного цикла
+    auto task = [this]() -> bool {
+        if (!m_running.load(std::memory_order_acquire)) {
+            return false; // Завершаем задачу
+        }
+
+        std::vector<std::wstring> batch;
+        bool immediate_flush = false;
+
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            if (m_queue.empty() && !m_immediate_flush_requested) {
+                return true; // Продолжаем, но нет работы
+            }
+
+            // Извлекаем batch
+            while (!m_queue.empty() && batch.size() < 64u) {
+                batch.push_back(std::move(m_queue.front()));
+                m_queue.pop_front();
+                m_current_queue_memory -= batch.back().size() * sizeof(wchar_t);
+            }
+
+            immediate_flush = m_immediate_flush_requested && m_queue.empty();
+        }
+
+        // Обрабатываем batch
+        if (!batch.empty() || immediate_flush) {
+            processBatch(batch);
+
+            if (immediate_flush) {
+                std::lock_guard<std::mutex> lk(m_mutex);
+                if (m_queue.empty()) {
+                    m_immediate_flush_requested = false;
+                    m_cv.notify_all();
+                }
+            }
+        }
+
+        return true; // Продолжаем выполнение
+    };
+
+    // Предполагаем что ThreadManager поддерживает периодические задачи
+    m_threadManager->enqueueRepeating(task, std::chrono::milliseconds(100));
+}
+
+
+// ---------- flush ----------
+void EventLogSink::flush()
+{ {
+        std::lock_guard lk(m_mutex);
+        m_immediate_flush_requested = true;
+    }
+    m_cv.notify_one();
+
+    std::unique_lock lk(m_mutex);
+    const auto timeout = std::chrono::seconds(30);
+
+    const bool isSuccessfullyFlushed = m_cv.wait_for(lk, timeout, [this]
+    {
+        return m_queue.empty() && !m_immediate_flush_requested;
+    });
+    if (!isSuccessfullyFlushed)
+    {
+        std::cerr << "EventLogSink: flush timeout after 30 seconds, queue size: "
+                << m_queue.size() << "\n";
+
+        m_immediate_flush_requested = false;
     }
 }
+
 
 // ---------- close ----------
 void

@@ -70,6 +70,7 @@ private:
     static std::wstring utf8ToWide(std::string const& utf8);
 
     static WORD mapLevelToEventType(LogLevel level);
+    void EventLogSink::startThreadManagerTask();
 
     std::wstring m_sourceNameW;
     HANDLE m_hEventLog;
@@ -83,7 +84,8 @@ private:
     std::atomic<bool> m_running;
 
     std::atomic<unsigned long long> m_dropped;
-
+    ULONGLONG m_current_queue_memory{0};
+    std::atomic<bool> m_immediate_flush_requested{false};
     static unsigned long const kMaxPayloadBytes;
 };
 

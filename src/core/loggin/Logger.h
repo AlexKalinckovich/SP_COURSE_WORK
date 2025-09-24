@@ -89,6 +89,14 @@ struct LogRecord
     [[nodiscard]] std::string toNDJsonLine() const;
 };
 
+struct  LoggerStats
+{
+    std::size_t queue_size;
+    std::size_t dropped_count;
+    int active_batches;
+    bool is_running;
+};
+
 /**
  * ILogSink - sink interface. Implement this for FileLogger, EventLogSink etc.
  *
@@ -142,6 +150,9 @@ public:
 
     void removeSink(const std::shared_ptr<ILogSink> &sink);
 
+    template<typename Predicate>
+    void removeSinkIf(Predicate pred);
+
     void log(LogLevel level,
         std::string message,
         std::string operation = {},
@@ -155,18 +166,30 @@ public:
 
     void flush();
 
-    LoggingProfile profile() const;
+    LoggingProfile profile() const noexcept;
 
-    std::size_t queueSize() const;
+    std::size_t queueSize() const noexcept;
 
-    std::size_t droppedCount() const;
+    std::size_t droppedCount() const noexcept;
+
+    LoggerStats getStats() const noexcept;
 
 private:
     void writerLoop(std::stop_token stoken);
 
+    bool shouldSkipByProfile(LogLevel level) const;
+    void handleOverflowPolicy(std::unique_lock<std::mutex>& lk, LogRecord& rec);
+
+    static void processBatchWithSinks(const std::vector<LogRecord>& batch, const std::vector<std::shared_ptr<ILogSink>>& sinks);
+    void processRemainingRecords(const std::stop_token &stoken);
+
     static std::string currentIsoUtcTimestamp();
 
     static std::string threadIdToString(std::thread::id id);
+
+    void flushAllSinks() const;
+
+
 
     std::size_t m_maxQueue;
     LoggingProfile m_profile;
@@ -176,9 +199,12 @@ private:
     std::condition_variable m_cv;
     std::deque<LogRecord> m_queue;
     std::vector<std::shared_ptr<ILogSink>> m_sinks;
+    std::atomic<int> active_batches{0};
 
     std::jthread m_worker;
     std::atomic<bool> m_running{ false };
     std::atomic<std::size_t> m_droppedCount{ 0 };
+    std::atomic<std::size_t> m_atomicQueueSize{0};
+
 };
 } // namespace core::logging

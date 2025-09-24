@@ -16,7 +16,7 @@ add_library(threads STATIC
         ../core/loggin/FileLogger.cpp
         ../core/loggin/EventLogSink.h
         ../core/loggin/EventLogSink.cpp
-        ../core/loggin/tests/test_logger.cpp
+        ../core/registry/RegistryHelpers.h
 )
 
 target_include_directories(threads PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
