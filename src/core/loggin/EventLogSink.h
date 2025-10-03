@@ -66,11 +66,11 @@ private:
     void writerLoop(const std::stop_token &stoken);
 
     bool sendEventWide(std::wstring const& wideLine, LogLevel level);
-
+    void processBatch(std::vector<std::wstring> const& batch);
     static std::wstring utf8ToWide(std::string const& utf8);
 
     static WORD mapLevelToEventType(LogLevel level);
-    void EventLogSink::startThreadManagerTask();
+    void startThreadManagerTask();
 
     std::wstring m_sourceNameW;
     HANDLE m_hEventLog;

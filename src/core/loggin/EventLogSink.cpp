@@ -76,7 +76,7 @@ WORD EventLogSink::mapLevelToEventType(LogLevel level)
     m_running.store(true, std::memory_order_release);
 
     if (m_threadManager == nullptr) {
-        m_worker = std::jthread([this](std::stop_token st) {
+        m_worker = std::jthread([this](const std::stop_token &st) {
             this->writerLoop(st);
         });
     } else {
@@ -258,7 +258,7 @@ bool EventLogSink::sendEventWide(const std::wstring& wideLine, LogLevel level)
             std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
 
             // Попробуем переоткрыть handle при определенных ошибках
-            if (error == RPC_S_INVALID_BINDING || error == EVENTLOG_CANT_OPEN_LOG) {
+            if (error == RPC_S_INVALID_BINDING) {
                 if (m_hEventLog != nullptr) {
                     DeregisterEventSource(m_hEventLog);
                     m_hEventLog = nullptr;
@@ -273,7 +273,12 @@ bool EventLogSink::sendEventWide(const std::wstring& wideLine, LogLevel level)
     return false;
 }
 
-    void EventLogSink::startThreadManagerTask()
+void EventLogSink::processBatch(std::vector<std::wstring> const &batch)
+{
+
+}
+
+void EventLogSink::startThreadManagerTask()
 {
     // Периодическая задача вместо вечного цикла
     auto task = [this]() -> bool {
@@ -317,7 +322,7 @@ bool EventLogSink::sendEventWide(const std::wstring& wideLine, LogLevel level)
     };
 
     // Предполагаем что ThreadManager поддерживает периодические задачи
-    m_threadManager->enqueueRepeating(task, std::chrono::milliseconds(100));
+    m_threadManager->scheduleRecurring(std::chrono::milliseconds(100), task);
 }
 
 

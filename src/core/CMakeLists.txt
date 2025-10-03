@@ -1,6 +1,5 @@
 add_library(core STATIC
         registry/RegistryFacade.cpp
-        registry/RegistryKey.cpp
         watcher/RegistryWatcher.cpp
         snapshot/SnapshotManager.cpp
         logging/Logger.cpp
