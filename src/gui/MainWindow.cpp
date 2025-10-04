@@ -65,12 +65,10 @@ MainWindow::RegisterWindowClass() const
 }
 
 // -------------------- Create child controls (tree only for minimal GUI) --------------------
-bool
-MainWindow::CreateChildControls()
+bool MainWindow::CreateChildControls()
 {
-    // Create RegistryTreeView and initialize it.
     m_tree = std::make_unique<RegistryTreeView>();
-
+    m_valuesView = std::make_unique<RegistryValuesView>();
     bool ok = m_tree->Initialize(m_hwnd, m_hInstance, m_threadManager, m_facade);
     if (ok == false)
     {
@@ -79,24 +77,27 @@ MainWindow::CreateChildControls()
         return false;
     }
 
-    // Populate top-level hive nodes (HKEY_CURRENT_USER, etc).
+    ok = m_valuesView->Initialize(m_hwnd, m_hInstance, 1002);
     m_tree->PopulateHives();
 
     return true;
 }
 
 // -------------------- Layout children (simple full-client tree) --------------------
-void
-MainWindow::LayoutChildren(int width, int height)
+void MainWindow::LayoutChildren(const int width, const int height) const
 {
+    const int half = width / 2;
     if (m_tree != nullptr && m_tree->Handle() != nullptr)
     {
-        MoveWindow(m_tree->Handle(), 0, 0, width, height, TRUE);
-        m_tree->UpdateColumnWidth();
+        MoveWindow(m_tree->Handle(), 0, 0, half, height, TRUE);
+    }
+    if (m_valuesView != nullptr && m_valuesView->Handle() != nullptr)
+    {
+        MoveWindow(m_valuesView->Handle(), half, 0, width - half, height, TRUE);
     }
 }
 
-// -------------------- Initialize / Create window --------------------
+
 MainWindow::MainWindow(HINSTANCE hInstance, IThreadManager* threadManager, core::registry::RegistryFacade* facade)
     : m_hInstance(hInstance)
     , m_hwnd(nullptr)
@@ -108,7 +109,6 @@ MainWindow::MainWindow(HINSTANCE hInstance, IThreadManager* threadManager, core:
 
 MainWindow::~MainWindow()
 {
-    // Ensure child wrapper is destroyed on UI thread (expected).
     m_tree.reset();
 }
 
@@ -156,9 +156,7 @@ MainWindow::Initialize(int nCmdShow)
     return true;
 }
 
-// -------------------- Message loop --------------------
-int
-MainWindow::RunMessageLoop()
+int MainWindow::RunMessageLoop()
 {
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0)
@@ -169,31 +167,83 @@ MainWindow::RunMessageLoop()
     return static_cast<int>(msg.wParam);
 }
 
-// -------------------- WM_NOTIFY forwarder --------------------
-LRESULT
-MainWindow::HandleNotify(LPNMHDR pnmh)
+LRESULT MainWindow::HandleNotify(LPNMHDR pnmh) const
 {
     if (pnmh == nullptr)
     {
         return 0;
     }
 
-    // If the notification originates from our tree control, forward to wrapper.
     if (m_tree != nullptr && pnmh->hwndFrom == m_tree->Handle())
     {
         return m_tree->HandleNotify(pnmh);
     }
 
-    // No special handling; return 0.
     return 0;
 }
 
-// -------------------- Handle worker-posted WM_APP_* messages --------------------
-LRESULT
-MainWindow::HandleAppMessage(UINT msg, WPARAM wParam, LPARAM /*lParam*/) const
+LRESULT MainWindow::HandleAppMessage(const UINT msg, WPARAM wParam, LPARAM /*lParam*/) const
 {
     switch (msg)
     {
+        case WM_APP_SELECTION_CHANGED:
+        {
+            struct SelMsg { HKEY root; std::wstring path; };
+            const auto sel = reinterpret_cast<SelMsg*>(wParam);
+            if (sel != nullptr)
+            {
+                HKEY hiveRoot = sel->root;
+                const std::wstring keyPath = sel->path;
+                delete sel;
+
+                IThreadManager* tm = m_threadManager;
+                const core::registry::RegistryFacade* facade = m_facade;
+                HWND uiWnd = m_hwnd;
+                auto vr = new (std::nothrow) ValuesResult();
+                if (vr == nullptr)
+                {
+                    return 1;
+                }
+
+                vr->hiveRoot = hiveRoot;
+                vr->fullPath = keyPath;
+
+                try
+                {
+                    vr->values = facade->ListValues(hiveRoot, keyPath, KEY_READ, core::registry::RegistryFacade::ListOptions{});
+                    vr->errorCode = ERROR_SUCCESS;
+                }
+                catch (...)
+                {
+                    vr->errorCode = ERROR_ACCESS_DENIED;
+                }
+
+                PostMessageW(uiWnd,
+                             WM_APP_LIST_VALUES_RESULT,
+                             reinterpret_cast<WPARAM>(vr),
+                             0);
+                // tm->enqueue([uiWnd, hiveRoot, keyPath, facade]()
+                // {
+                //
+                // });
+            }
+            return 0;
+        }
+
+        case WM_APP_LIST_VALUES_RESULT:
+        {
+            ValuesResult* vr = reinterpret_cast<ValuesResult*>(wParam);
+            if (vr != nullptr)
+            {
+                if (m_valuesView != nullptr)
+                {
+                    m_valuesView->HandleValuesResult(vr);
+                }
+                delete vr;
+            }
+            return 0;
+        }
+
         case WM_APP_UPDATE_COLUMN_WIDTH:
         {
             if (m_tree) {
@@ -203,18 +253,14 @@ MainWindow::HandleAppMessage(UINT msg, WPARAM wParam, LPARAM /*lParam*/) const
         }
         case WM_APP_TREE_EXPAND_RESULT:
         {
-            ExpandResult* res = reinterpret_cast<ExpandResult*>(wParam);
+            const auto res = reinterpret_cast<ExpandResult*>(wParam);
             if (res != nullptr && m_tree != nullptr)
             {
-                m_tree->HandleExpandResult(res); // UI thread; this deletes res
+                m_tree->HandleExpandResult(res);
             }
             else
             {
-                // Defensive cleanup if tree missing
-                if (res != nullptr)
-                {
-                    delete res;
-                }
+                delete res;
             }
             return 0;
         }
@@ -230,7 +276,6 @@ MainWindow::HandleAppMessage(UINT msg, WPARAM wParam, LPARAM /*lParam*/) const
                 }
                 else
                 {
-                    // Fallback: show message and free
                     MessageBoxW(m_hwnd, err->c_str(), L"Error", MB_OK | MB_ICONERROR);
                     delete err;
                 }
@@ -246,39 +291,32 @@ MainWindow::HandleAppMessage(UINT msg, WPARAM wParam, LPARAM /*lParam*/) const
 }
 
 // -------------------- Instance WndProc handlers --------------------
-LRESULT
-MainWindow::OnCreate(HWND hwnd, LPCREATESTRUCTW /*createStruct*/)
+LRESULT MainWindow::OnCreate(HWND hwnd, LPCREATESTRUCTW /*createStruct*/)
 {
-    // Associate this HWND with the MainWindow instance
     SetThisPtr(hwnd, this);
     m_hwnd = hwnd;
 
-    // Create child controls (RegistryTreeView)
     if (!CreateChildControls())
     {
-        return -1; // abort window creation
+        return -1;
     }
 
     return 0;
 }
 
-LRESULT
-MainWindow::OnSize(int width, int height)
+LRESULT MainWindow::OnSize(const int width, const int height) const
 {
     LayoutChildren(width, height);
     return 0;
 }
 
-LRESULT
-MainWindow::OnDestroy()
+LRESULT MainWindow::OnDestroy()
 {
     PostQuitMessage(0);
     return 0;
 }
 
-// -------------------- Static WndProc --------------------
-LRESULT CALLBACK
-MainWindow::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+LRESULT CALLBACK MainWindow::StaticWndProc(HWND hwnd, const UINT msg, const WPARAM wParam, const LPARAM lParam)
 {
     if (msg == WM_CREATE)
     {
@@ -315,8 +353,10 @@ MainWindow::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case WM_APP_TREE_EXPAND_RESULT:
         case WM_APP_OPERATION_ERROR:
+        case WM_APP_SELECTION_CHANGED:
+        case WM_APP_LIST_VALUES_RESULT:
         {
-            return self->HandleAppMessage(static_cast<UINT>(msg), wParam, lParam);
+            return self->HandleAppMessage(msg, wParam, lParam);
         }
 
         case WM_DESTROY:

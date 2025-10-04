@@ -12,6 +12,8 @@
 namespace core::registry
 {
 
+
+
 class RegistryFacade
 {
 public:
@@ -57,12 +59,12 @@ public:
     std::vector<std::wstring> ListSubKeys(HKEY root,
                                          std::wstring const& subKeyPath,
                                          REGSAM sam,
-                                         ListOptions options);
+                                         ListOptions options) const;
 
     std::vector<RegValueRecord> ListValues(HKEY root,
                                           std::wstring const& subKeyPath,
                                           REGSAM sam,
-                                          ListOptions options);
+                                          ListOptions options) const;
 
     std::wstring GetStringValue(HKEY root,
                                std::wstring const& subKeyPath,

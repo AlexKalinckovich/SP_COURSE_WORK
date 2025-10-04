@@ -3,7 +3,6 @@
 
 #include <windows.h>
 #include <utility>
-#include <utility>
 #include <vector>
 #include <iostream>
 namespace core::logging
@@ -193,7 +192,7 @@ void EventLogSink::writerLoop(const std::stop_token& stoken)
 
         if (!batch.empty() || immediate_flush)
         {
-            processBatch(batch);
+            processBatch(batch, log_levels);
 
             if (immediate_flush)
             {
@@ -273,9 +272,43 @@ bool EventLogSink::sendEventWide(const std::wstring& wideLine, LogLevel level)
     return false;
 }
 
-void EventLogSink::processBatch(std::vector<std::wstring> const &batch)
+    void EventLogSink::processBatch(const std::vector<std::wstring>& batch, const std::vector<LogLevel>& levels)
 {
+    if (batch.empty()) return;
 
+    ULONGLONG successful_sends = 0;
+    ULONGLONG failed_sends = 0;
+
+    for (size_t i = 0; i < batch.size(); ++i) {
+        const bool success = sendEventWide(batch[i], levels[i]);
+
+        if (success) {
+            ++successful_sends;
+        } else {
+            ++failed_sends;
+
+            if (levels[i] == LogLevel::Error || levels[i] == LogLevel::Critical) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                sendEventWide(batch[i], levels[i]); // Вторая попытка
+            }
+        }
+
+        // Небольшая задержка между сообщениями чтобы не перегружать Event Log
+        if (i < batch.size() - 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+
+    // Обновляем статистику
+    if (failed_sends > 0) {
+        m_dropped.fetch_add(failed_sends, std::memory_order_relaxed);
+    }
+
+    // Логируем статистику для больших batch'ей
+    if (batch.size() > 10) {
+        std::cout << "EventLogSink: processed batch - " << successful_sends
+                  << " successful, " << failed_sends << " failed\n";
+    }
 }
 
 void EventLogSink::startThreadManagerTask()
@@ -305,12 +338,11 @@ void EventLogSink::startThreadManagerTask()
             immediate_flush = m_immediate_flush_requested && m_queue.empty();
         }
 
-        // Обрабатываем batch
         if (!batch.empty() || immediate_flush) {
-            processBatch(batch);
+            processBatch(batch, log_levels);
 
             if (immediate_flush) {
-                std::lock_guard<std::mutex> lk(m_mutex);
+                std::lock_guard lk(m_mutex);
                 if (m_queue.empty()) {
                     m_immediate_flush_requested = false;
                     m_cv.notify_all();
@@ -318,10 +350,9 @@ void EventLogSink::startThreadManagerTask()
             }
         }
 
-        return true; // Продолжаем выполнение
+        return true;
     };
 
-    // Предполагаем что ThreadManager поддерживает периодические задачи
     m_threadManager->scheduleRecurring(std::chrono::milliseconds(100), task);
 }
 

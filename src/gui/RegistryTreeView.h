@@ -24,10 +24,19 @@
 #include "Messages.h"
 namespace core::registry
 {
+    struct RegValueRecord;
     class RegistryFacade;
 }
 
 class IThreadManager; // forward (your threadpool interface)
+
+struct ValuesResult
+{
+    HKEY hiveRoot;
+    std::wstring fullPath;             // path of the key whose values are listed
+    std::vector<core::registry::RegValueRecord> values;
+    LONG errorCode;                     // ERROR_SUCCESS or error
+};
 
 
 struct ExpandResult
@@ -93,12 +102,12 @@ public:
     std::optional<std::wstring>GetItemPath(HTREEITEM item) const;
 
     // Cleanup all items and mappings. UI thread.
-    void Clear();
+    void Clear() const;
 
     // Helper: forward WM_NOTIFY from parent to this control wrapper.
     // Should be called from MainWindow's WM_NOTIFY handler when pnmh->hwndFrom == Handle().
     // Implementation will inspect TVN_ITEMEXPANDING and call RequestExpand(...) as required.
-    LRESULT HandleNotify(LPNMHDR pnmh);
+    LRESULT HandleNotify(LPNMHDR pnmh) const;
     void UpdateColumnWidth() const;
 
 private:
@@ -130,5 +139,5 @@ private:
 
     // Insert item (UI thread) low-level helper that also registers item path/hive in maps.
     HTREEITEM
-    InsertItemInternal(HTREEITEM parent, TVINSERTSTRUCTW const& tvins, std::wstring const& fullPath, HKEY hiveRoot) const;
+    InsertItemInternal(TVINSERTSTRUCTW const &tvins, std::wstring const &fullPath, HKEY hiveRoot) const;
 };

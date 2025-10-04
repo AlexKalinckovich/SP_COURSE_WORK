@@ -389,8 +389,18 @@ std::vector<RegValueRecord> EnumerateValues(RegistryKey const& key)
             throw RegException(enumStatus, FormatWinErrorMessage(enumStatus));
         }
 
+        std::wstring valueName;
+        if (nameLen == 0)
+        {
+            valueName = L"<Default_Value>";
+        }
+        else
+        {
+            valueName = std::wstring(nameBuffer.data(), nameLen);
+        }
+
         result.emplace_back(RegValueRecord{
-            std::wstring(nameBuffer.data(), nameLen),
+            valueName,
             type,
             std::vector(dataBuffer.begin(), dataBuffer.begin() + dataSize)
         });

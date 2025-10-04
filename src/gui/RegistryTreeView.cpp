@@ -146,7 +146,7 @@ int RegistryTreeView::CalculateMaxItemWidth() const
     SelectObject(hdc, hOldFont);
     ReleaseDC(m_hwnd, hdc);
 
-    return maxWidth + 100; // 100 pixels padding
+    return maxWidth + 100;
 }
 
 
@@ -158,19 +158,10 @@ HWND RegistryTreeView::Handle() const noexcept
 
 void RegistryTreeView::PopulateHives()
 {
-    // HKEY_CLASSES_ROOT
     InsertNode(nullptr, L"HKEY_CLASSES_ROOT", std::wstring(), HKEY_CLASSES_ROOT, true);
-
-    // HKEY_CURRENT_USER
     InsertNode(nullptr, L"HKEY_CURRENT_USER", std::wstring(), HKEY_CURRENT_USER, true);
-
-    // HKEY_LOCAL_MACHINE
     InsertNode(nullptr, L"HKEY_LOCAL_MACHINE", std::wstring(), HKEY_LOCAL_MACHINE, true);
-
-    // HKEY_USERS
     InsertNode(nullptr, L"HKEY_USERS", std::wstring(), HKEY_USERS, true);
-
-    // HKEY_CURRENT_CONFIG
     InsertNode(nullptr, L"HKEY_CURRENT_CONFIG", std::wstring(), HKEY_CURRENT_CONFIG, true);
 }
 
@@ -190,7 +181,6 @@ RegistryTreeView::InsertNode(HTREEITEM parent, std::wstring const& name, std::ws
     item.cchTextMax = 255;
     tvins.item = item;
 
-    // Create item
     auto inserted = reinterpret_cast<HTREEITEM>(SendMessageW(m_hwnd, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tvins)));
 
     if (inserted == nullptr)
@@ -211,7 +201,7 @@ RegistryTreeView::InsertNode(HTREEITEM parent, std::wstring const& name, std::ws
     {
         wchar_t dbg[600];
         swprintf_s(dbg, L"[InsertNode] inserted item %p text = \"%s\" fullPath = \"%s\"\n",
-                   (void*)inserted, buf, fullPath.c_str());
+                   inserted, buf, fullPath.c_str());
         OutputDebugStringW(dbg);
     }
 
@@ -260,7 +250,7 @@ RegistryTreeView::RequestExpand(HTREEITEM item) const
         }
         else
         {
-            hiveRoot = HKEY_CURRENT_USER; // fallback; shouldn't happen
+            hiveRoot = HKEY_CURRENT_USER;
         }
     }
 
@@ -391,30 +381,20 @@ RegistryTreeView::GetItemPath(HTREEITEM item) const
     return {it->second};
 }
 
-void
-RegistryTreeView::Clear()
+void RegistryTreeView::Clear() const
 {
     if (m_hwnd != nullptr)
     {
         TreeView_DeleteAllItems(m_hwnd);
     }
 
-    std::lock_guard<std::mutex> guard(m_mapMutex);
+    std::lock_guard guard(m_mapMutex);
     m_itemPathMap.clear();
     m_itemHiveMap.clear();
 }
 
-LRESULT RegistryTreeView::HandleNotify(LPNMHDR pnmh)
+LRESULT RegistryTreeView::HandleNotify(LPNMHDR pnmh) const
 {
-    {
-        wchar_t buf[256];
-        wsprintfW(buf, L"[RegistryTreeView::HandleNotify] this=0x%p hwndFrom=0x%p code=%d (0x%X)\n",
-                  reinterpret_cast<void*>(this),
-                  reinterpret_cast<void*>(pnmh ? pnmh->hwndFrom : nullptr),
-                  pnmh ? pnmh->code : 0,
-                  pnmh ? pnmh->code : 0);
-        OutputDebugStringW(buf);
-    }
 
     if (pnmh == nullptr)
     {
@@ -426,8 +406,48 @@ LRESULT RegistryTreeView::HandleNotify(LPNMHDR pnmh)
         return 0;
     }
 
+
+
     switch (pnmh->code)
     {
+        case TVN_SELCHANGEDA:
+        case TVN_SELCHANGEDW:
+        {
+            LPNMTREEVIEWW pTree = reinterpret_cast<LPNMTREEVIEWW>(pnmh);
+            if (pTree != nullptr)
+            {
+                HTREEITEM newItem = pTree->itemNew.hItem;
+                if (newItem != nullptr)
+                {
+                    const std::optional<std::wstring> maybePath = GetItemPath(newItem);
+                    if (maybePath.has_value())
+                    {
+                        HKEY hiveRoot = HKEY_CURRENT_USER;
+                        {
+                            std::lock_guard guard(m_mapMutex);
+                            auto it = m_itemHiveMap.find(newItem);
+                            if (it != m_itemHiveMap.end())
+                            {
+                                hiveRoot = it->second;
+                            }
+                        }
+
+                        struct SelMsg { HKEY root; std::wstring path; };
+                        SelMsg* msg = new (std::nothrow) SelMsg{ hiveRoot, maybePath.value() };
+                        if (msg != nullptr)
+                        {
+
+                            PostMessageW(m_parentWnd,
+                                         WM_APP_SELECTION_CHANGED,
+                                         reinterpret_cast<WPARAM>(msg),
+                                         0);
+                        }
+                    }
+                }
+            }
+            return 0;
+        }
+
         case TVN_ITEMEXPANDING:
         {
             LPNMTREEVIEWW pTree = reinterpret_cast<LPNMTREEVIEWW>(pnmh);
@@ -446,13 +466,11 @@ LRESULT RegistryTreeView::HandleNotify(LPNMHDR pnmh)
             return 0;
         }
 
-        // Post-expand (already expanded) — optional: sometimes easier to react to this
         case TVN_ITEMEXPANDED:
         {
             LPNMTREEVIEWW pTree = reinterpret_cast<LPNMTREEVIEWW>(pnmh);
             if (pTree != nullptr)
             {
-                // Similar handling as above (but note action may be TVE_EXPAND or TVE_COLLAPSE)
                 if ((pTree->action & TVE_EXPAND) != 0)
                 {
                     HTREEITEM item = pTree->itemNew.hItem;
@@ -460,22 +478,6 @@ LRESULT RegistryTreeView::HandleNotify(LPNMHDR pnmh)
                     {
                         RequestExpand(item);
                     }
-                }
-            }
-            return 0;
-        }
-
-        // Selection changed — keep as before
-        case TVN_SELCHANGED:
-        {
-            LPNMTREEVIEWW pTree = reinterpret_cast<LPNMTREEVIEWW>(pnmh);
-            if (pTree != nullptr)
-            {
-                HTREEITEM newItem = pTree->itemNew.hItem;
-                if (newItem != nullptr)
-                {
-                    std::optional<std::wstring> maybePath = GetItemPath(newItem);
-                    (void) maybePath;
                 }
             }
             return 0;
@@ -566,13 +568,13 @@ void RegistryTreeView::RemoveDummyChild(HTREEITEM parent) const
     }
 }
 
-HTREEITEM RegistryTreeView::InsertItemInternal(HTREEITEM parent, TVINSERTSTRUCTW const& tvins, std::wstring const& fullPath, HKEY hiveRoot) const
+HTREEITEM RegistryTreeView::InsertItemInternal(TVINSERTSTRUCTW const &tvins, std::wstring const &fullPath, HKEY hiveRoot) const
 {
-    TVINSERTSTRUCTW insCopy = tvins; // copy
+    TVINSERTSTRUCTW insCopy = tvins;
     HTREEITEM inserted = TreeView_InsertItem(m_hwnd, &insCopy);
     if (inserted != nullptr)
     {
-        std::lock_guard<std::mutex> guard(m_mapMutex);
+        std::lock_guard guard(m_mapMutex);
         m_itemPathMap.insert(std::make_pair(inserted, fullPath));
         m_itemHiveMap.insert(std::make_pair(inserted, hiveRoot));
     }

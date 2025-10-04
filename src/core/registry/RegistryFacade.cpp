@@ -270,8 +270,7 @@ void RegistryFacade::CacheKey(HKEY root, const std::wstring& subKeyPath, REGSAM 
     EnforceCacheSizeLimits();
 }
 
-std::optional<RegistryFacade::CachedValue>
-RegistryFacade::FindCachedValue(HKEY root, const std::wstring& subKeyPath,
+std::optional<RegistryFacade::CachedValue> RegistryFacade::FindCachedValue(HKEY root, const std::wstring& subKeyPath,
                                const std::wstring& valueName, REGSAM sam) const
 {
     if (!m_cacheConfig.enabled) {
@@ -282,14 +281,14 @@ RegistryFacade::FindCachedValue(HKEY root, const std::wstring& subKeyPath,
     CleanupExpiredCache();
 
     auto now = std::chrono::steady_clock::now();
-    auto it = std::find_if(m_valueCache.begin(), m_valueCache.end(),
-        [&](const CachedValue& cached) {
-            return cached.root == root &&
-                   cached.subKeyPath == subKeyPath &&
-                   cached.valueName == valueName &&
-                   cached.sam == sam &&
-                   cached.expiryTime > now;
-        });
+    auto it = std::ranges::find_if(m_valueCache,
+                                   [&](const CachedValue& cached) {
+                                       return cached.root == root &&
+                                              cached.subKeyPath == subKeyPath &&
+                                              cached.valueName == valueName &&
+                                              cached.sam == sam &&
+                                              cached.expiryTime > now;
+                                   });
 
     if (it != m_valueCache.end()) {
         it->lastAccess = now;
@@ -310,13 +309,13 @@ void RegistryFacade::CacheValue(HKEY root, const std::wstring& subKeyPath,
 
     std::lock_guard lock(m_cacheMutex);
 
-    m_valueCache.erase(std::remove_if(m_valueCache.begin(), m_valueCache.end(),
-        [&](const CachedValue& cached) {
-            return cached.root == root &&
-                   cached.subKeyPath == subKeyPath &&
-                   cached.valueName == valueName &&
-                   cached.sam == sam;
-        }), m_valueCache.end());
+    m_valueCache.erase(std::ranges::remove_if(m_valueCache,
+                                              [&](const CachedValue& cached) {
+                                                  return cached.root == root &&
+                                                         cached.subKeyPath == subKeyPath &&
+                                                         cached.valueName == valueName &&
+                                                         cached.sam == sam;
+                                              }).begin(), m_valueCache.end());
 
     const auto now = std::chrono::steady_clock::now();
     CachedValue newEntry{
@@ -490,8 +489,7 @@ RegistryKey RegistryFacade::OpenKeyUncached(HKEY root,
     return RegistryKey::Open(root, subKeyPath, sam);
 }
 
-std::vector<std::wstring>
-RegistryFacade::ListSubKeys(HKEY root, std::wstring const& subKeyPath, REGSAM sam, ListOptions options)
+std::vector<std::wstring> RegistryFacade::ListSubKeys(HKEY root, std::wstring const& subKeyPath, REGSAM sam, ListOptions options) const
 {
     auto startTime = std::chrono::steady_clock::now();
 
@@ -502,7 +500,6 @@ RegistryFacade::ListSubKeys(HKEY root, std::wstring const& subKeyPath, REGSAM sa
         if (options.offset >= result.size()) {
             result.clear();
         } else {
-            // Assume: std::vector<std::wstring> result; auto startIt = result.begin() + options.offset;
             auto startIt = result.begin();
             std::advance(startIt, static_cast<std::ptrdiff_t>(options.offset));
 
@@ -531,24 +528,37 @@ RegistryFacade::ListSubKeys(HKEY root, std::wstring const& subKeyPath, REGSAM sa
     return result;
 }
 
-std::vector<RegValueRecord>
-RegistryFacade::ListValues(HKEY root, std::wstring const& subKeyPath, REGSAM sam, ListOptions options)
+    std::vector<RegValueRecord> RegistryFacade::ListValues(HKEY root, std::wstring const& subKeyPath, REGSAM sam, ListOptions options) const
 {
-    auto startTime = std::chrono::steady_clock::now();
+    const auto startTime = std::chrono::steady_clock::now();
 
     RegistryKey key = OpenKeyInternal(root, subKeyPath, sam, false, options.forceRefresh);
     std::vector<RegValueRecord> result = EnumerateValues(key);
 
-    // Применяем пагинацию
-    if (options.offset > 0 || options.maxItems > 0) {
-        if (options.offset >= result.size()) {
+    if (options.offset > 0 || options.maxItems > 0)
+    {
+        const auto diff_offset = static_cast<std::ptrdiff_t>(options.offset);
+        const auto diff_size = static_cast<std::ptrdiff_t>(result.size());
+
+        if (diff_offset >= diff_size)
+        {
             result.clear();
-        } else {
-            auto startIt = result.begin() + options.offset;
-            auto endIt = options.maxItems > 0 ?
-                startIt + std::min(options.maxItems, result.size() - options.offset) :
-                result.end();
-            result = std::vector<RegValueRecord>(startIt, endIt);
+        }
+        else
+        {
+            const auto startIt = result.begin() + diff_offset;
+
+            if (options.maxItems > 0)
+            {
+                const auto diff_maxItems = static_cast<std::ptrdiff_t>(options.maxItems);
+                const auto itemsToTake = std::min(diff_maxItems, diff_size - diff_offset);
+                const auto endIt = startIt + itemsToTake;
+                result = std::vector(startIt, endIt);
+            }
+            else
+            {
+                result = std::vector(startIt, result.end());
+            }
         }
     }
 

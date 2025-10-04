@@ -66,7 +66,7 @@ private:
     void writerLoop(const std::stop_token &stoken);
 
     bool sendEventWide(std::wstring const& wideLine, LogLevel level);
-    void processBatch(std::vector<std::wstring> const& batch);
+    void processBatch(const std::vector<std::wstring>& batch, const std::vector<LogLevel>& levels);
     static std::wstring utf8ToWide(std::string const& utf8);
 
     static WORD mapLevelToEventType(LogLevel level);
@@ -87,6 +87,7 @@ private:
     ULONGLONG m_current_queue_memory{0};
     std::atomic<bool> m_immediate_flush_requested{false};
     static unsigned long const kMaxPayloadBytes;
+    std::vector<LogLevel> log_levels = std::vector{LogLevel::Debug};
 };
 
 } // namespace core::logging

@@ -46,6 +46,15 @@ target_include_directories(core_lib PUBLIC
 # create executable
 add_executable(${PROJECT_NAME}
         ${SRC_ROOT}/app/main.cpp
+        src/gui/RegistryValuesView.h
+        src/gui/RegistryValuesView.cpp
+        src/core/registry/facade/IKeyManager.h
+        src/core/registry/facade/IKeyManager.cpp
+        src/core/registry/facade/IValueManager.h
+        src/core/registry/facade/IValueManager.cpp
+        src/core/registry/facade/ICacheManager.h
+        src/core/registry/facade/ICacheManager.cpp
+        src/core/registry/facade/IStatsManager.h
 )
 
 # link the core static lib
